@@ -6,7 +6,7 @@ import requests
 from bs4 import BeautifulSoup
 import pytesseract
 from PIL import Image
-from pdf2image import convert_from_bytes
+from pypdf import PdfReader # NUEVA LIBRERÍA
 from datetime import datetime
 import re
 
@@ -68,32 +68,28 @@ def verificar_premio(jugada_nums, jugada_sb, ganador_nums, ganador_sb):
     elif aciertos_nums == 0 and acierto_sb: return "Premio (0+1)"
     else: return "Sin premio"
 
-# --- 3. PROCESAMIENTO OCR AVANZADO ---
+# --- 3. PROCESAMIENTO TEXTO Y OCR ---
 def extraer_datos_tiquete(texto):
     datos = {"sorteo": "Desconocido", "fecha": "Desconocida", "jugadas": []}
-    
-    # Aplanar el texto: convierte todos los saltos de línea y múltiples espacios en un solo espacio
     texto_plano = re.sub(r'\s+', ' ', texto)
     
-    # 1. Extraer número de sorteo (Ej: S2712)
-    # Tesseract a veces separa la S de los números
-    match_sorteo = re.search(r'S\s*(\d{4,5})', texto_plano)
+    # 1. Extraer número de sorteo corrigiendo el error de la 'S' como '5'
+    match_sorteo = re.search(r'(?:S|SORTEOX?\d?.*?)\s*(\d{4,5})\b', texto_plano, re.IGNORECASE)
+    if not match_sorteo:
+        # Fallback si Tesseract pegó todo como 52712
+        match_sorteo = re.search(r'(5)(\d{4})\b', texto_plano)
+        
     if match_sorteo:
-        datos["sorteo"] = "S" + match_sorteo.group(1)
-    else:
-        # Fallback buscando cerca de la palabra SORTEO
-        match_fallback = re.search(r'SORTEO.*?\s(\d{4})', texto_plano, re.IGNORECASE)
-        if match_fallback:
-            datos["sorteo"] = "S" + match_fallback.group(1)
+        num = match_sorteo.groups()[-1] 
+        datos["sorteo"] = "S" + num
             
-    # 2. Extraer fecha de sorteo (Ej: 21 DE SEPTIEMBRE 2026)
+    # 2. Extraer fecha de sorteo
     match_fecha = re.search(r'(\d{1,2}\s+DE\s+[A-Z]+\s+\d{4})', texto_plano, re.IGNORECASE)
     if match_fecha:
         datos["fecha"] = match_fecha.group(1).title()
         
-    # 3. Extraer jugadas (Ej: A. BR 07 24 27 30 32 03 M)
-    # Busca Letra, punto, opcional BR, y 6 números consecutivos (5 normales + 1 SB)
-    patron_jugada = r'([A-E])\.\s*(?:BR|8R)?\s*(\d{1,2})\s+(\d{1,2})\s+(\d{1,2})\s+(\d{1,2})\s+(\d{1,2})\s+(\d{1,2})'
+    # 3. Extraer jugadas
+    patron_jugada = r'([A-E])[\.\s]+(?:BR|8R)?\s*(\d{1,2})\s+(\d{1,2})\s+(\d{1,2})\s+(\d{1,2})\s+(\d{1,2})\s+(\d{1,2})'
     matches = re.finditer(patron_jugada, texto_plano, re.IGNORECASE)
     
     for match in matches:
@@ -101,7 +97,6 @@ def extraer_datos_tiquete(texto):
         nums = [int(match.group(i)) for i in range(2, 7)]
         sb = int(match.group(7))
         
-        # Validación para descartar lecturas erróneas del OCR
         if all(1 <= n <= 43 for n in nums) and (1 <= sb <= 16):
             datos["jugadas"].append({"letra": letra, "numeros": nums, "super_balota": sb})
             
@@ -125,19 +120,22 @@ tab1, tab2, tab3 = st.tabs(["Escanear Tiquete (Nuevo)", "Resultados y Mis Jugada
 
 with tab1:
     st.subheader("Sube tu tiquete (PDF o Imagen)")
-    
     archivo_soporte = st.file_uploader("Captura de tiquete físico o web", type=['jpg', 'jpeg', 'png', 'pdf'])
     
     if archivo_soporte is not None:
         try:
             with st.spinner("Leyendo documento..."):
+                texto_ocr = ""
+                
+                # NUEVA LÓGICA: Si es PDF, leer texto digital directamente. Si es foto, usar OCR.
                 if archivo_soporte.name.lower().endswith('.pdf'):
-                    imagenes = convert_from_bytes(archivo_soporte.read(), dpi=300) # Aumentar DPI mejora la lectura
-                    img = imagenes[0]
+                    lector_pdf = PdfReader(archivo_soporte)
+                    for pagina in lector_pdf.pages:
+                        texto_ocr += pagina.extract_text() + " "
                 else:
                     img = Image.open(archivo_soporte)
+                    texto_ocr = pytesseract.image_to_string(img, lang='spa')
                 
-                texto_ocr = pytesseract.image_to_string(img, lang='spa')
                 datos_tiquete = extraer_datos_tiquete(texto_ocr)
                 
                 if datos_tiquete["jugadas"]:
@@ -146,7 +144,7 @@ with tab1:
                     for jugada in datos_tiquete["jugadas"]:
                         st.write(f"**Jugada {jugada['letra']}**: {jugada['numeros']} | SB: **{jugada['super_balota']}**")
                         
-                        if st.button(f"Guardar Jugada {jugada['letra']} en historial", key=f"btn_{jugada['letra']}"):
+                        if st.button(f"Guardar Jugada {jugada['letra']}", key=f"btn_{jugada['letra']}"):
                             nueva_jugada = {
                                 "sorteo": datos_tiquete['sorteo'],
                                 "fecha_sorteo": datos_tiquete['fecha'],
@@ -157,13 +155,10 @@ with tab1:
                             st.session_state.historial_usuario.append(nueva_jugada)
                             st.toast(f"Jugada {jugada['letra']} guardada.")
                 else:
-                    st.error("No se detectaron jugadas válidas. Revisa el texto crudo abajo para ajustar los filtros.")
+                    st.error("No se detectaron jugadas válidas.")
                     
                 with st.expander("Ver texto detectado (Debugging)"):
                     st.write(texto_ocr)
-                    st.write("---")
-                    st.write("Texto aplanado utilizado para buscar patrones:")
-                    st.write(re.sub(r'\s+', ' ', texto_ocr))
                     
         except Exception as e:
             st.error(f"Error procesando el archivo: {e}")

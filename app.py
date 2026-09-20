@@ -6,45 +6,66 @@ import requests
 from bs4 import BeautifulSoup
 import pytesseract
 from PIL import Image
+from pdf2image import convert_from_bytes
 from datetime import datetime
+import io
 
 # Configuración de página
 st.set_page_config(page_title="Predictor Baloto", layout="wide")
 
 # --- 1. SCRAPING Y DATOS HISTÓRICOS ---
-@st.cache_data(ttl=86400) # Se actualiza una vez al día
+@st.cache_data(ttl=43200) # Se actualiza cada 12 horas
 def obtener_historico_baloto():
-    """
-    Función para obtener el histórico. 
-    Nota: Las páginas oficiales suelen tener bloqueos antibot. 
-    Se recomienda usar un dataset CSV estático si el scraping directo falla,
-    aquí se simula una extracción estructurada.
-    """
-    # Simulación de un histórico de los últimos 100 sorteos para el cálculo estadístico
-    # En producción, reemplazar con requests.get('url_resultados') y BeautifulSoup
-    datos = []
-    for i in range(100):
-        numeros = random.sample(range(1, 44), 5)
-        super_balota = random.randint(1, 16)
-        datos.append(numeros + [super_balota])
+    url = "https://www.resultadobaloto.com/"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
+    }
     
-    df = pd.DataFrame(datos, columns=['N1', 'N2', 'N3', 'N4', 'N5', 'SuperBalota'])
-    return df
+    datos_extraidos = []
+    try:
+        respuesta = requests.get(url, headers=headers, timeout=10)
+        respuesta.raise_for_status()
+        soup = BeautifulSoup(respuesta.text, 'html.parser')
+        tablas = soup.find_all('table')
+        
+        for tabla in tablas:
+            filas = tabla.find_all('tr')
+            for fila in filas[1:]: 
+                columnas = fila.find_all('td')
+                if len(columnas) >= 3:
+                    combinacion = columnas[1].text.strip().replace('-', ' ')
+                    super_balota_texto = columnas[2].text.strip()
+                    numeros = combinacion.split()
+                    
+                    if len(numeros) == 5 and super_balota_texto.isdigit():
+                        n1, n2, n3, n4, n5 = [int(n) for n in numeros]
+                        sb = int(super_balota_texto)
+                        datos_extraidos.append([n1, n2, n3, n4, n5, sb])
+        
+        if len(datos_extraidos) > 0:
+            return pd.DataFrame(datos_extraidos, columns=['N1', 'N2', 'N3', 'N4', 'N5', 'SuperBalota'])
+        else:
+            raise ValueError("No se encontraron resultados en el formato esperado.")
+            
+    except Exception as e:
+        st.warning(f"No se pudo conectar a los resultados en vivo. Usando modo offline. Detalle: {e}")
+        for i in range(100):
+            numeros = sorted(random.sample(range(1, 44), 5))
+            super_balota = random.randint(1, 16)
+            datos_extraidos.append(numeros + [super_balota])
+            
+        return pd.DataFrame(datos_extraidos, columns=['N1', 'N2', 'N3', 'N4', 'N5', 'SuperBalota'])
 
 # --- 2. LÓGICA DE PROBABILIDAD ---
 def generar_jugada(df_historico):
-    # Frecuencia de los números del 1 al 43
     numeros_planos = df_historico[['N1', 'N2', 'N3', 'N4', 'N5']].values.flatten()
     frecuencia_num = pd.Series(numeros_planos).value_counts()
-    
-    # Frecuencia de la Super Balota
     frecuencia_sb = df_historico['SuperBalota'].value_counts()
     
-    # Descartar el 40% de los números que menos caen (los "fríos")
+    # Descartar el 40% de los números "fríos"
     top_numeros = frecuencia_num.head(int(43 * 0.6)).index.tolist()
     top_sb = frecuencia_sb.head(int(16 * 0.6)).index.tolist()
     
-    # Seleccionar al azar entre los más frecuentes
     jugada_numeros = sorted(random.sample(top_numeros, 5))
     jugada_sb = random.choice(top_sb)
     
@@ -52,31 +73,24 @@ def generar_jugada(df_historico):
 
 # --- 3. PROCESAMIENTO OCR ---
 def extraer_numeros_imagen(imagen):
-    # Configurar Tesseract para español
     texto = pytesseract.image_to_string(imagen, lang='spa')
-    # Lógica básica para buscar patrones de 5 números (1-43) y 1 super balota.
-    # Esta extracción se debe afinar según el formato físico del tiquete de Baloto.
     numeros_encontrados = [int(s) for s in texto.split() if s.isdigit()]
-    return numeros_encontrados # Requiere depuración según el OCR real
+    return numeros_encontrados
 
 # --- INTERFAZ STREAMLIT ---
 st.title("🎰 Predictor y Gestor de Baloto")
 
-# Cargar histórico
 df = obtener_historico_baloto()
 st.sidebar.header("Gestión de Historial")
 
-# Estado de la sesión para el historial
 if 'historial_usuario' not in st.session_state:
     st.session_state.historial_usuario = []
 
-# Cargar archivo JSON
 archivo_cargado = st.sidebar.file_uploader("Sube tu historial de jugadas (JSON)", type=['json'])
 if archivo_cargado is not None:
     st.session_state.historial_usuario = json.load(archivo_cargado)
     st.sidebar.success("Historial cargado correctamente.")
 
-# Pestañas de la aplicación
 tab1, tab2, tab3 = st.tabs(["Generar Jugada", "Mis Jugadas y Resultados", "Escanear Tiquete"])
 
 with tab1:
@@ -88,7 +102,6 @@ with tab1:
         st.markdown(f"### Tus números: **{nums[0]} - {nums[1]} - {nums[2]} - {nums[3]} - {nums[4]}**")
         st.markdown(f"### Super Balota: **{sb}**")
         
-        # Guardar en memoria
         nueva_jugada = {
             "fecha": datetime.now().strftime("%Y-%m-%d"),
             "numeros": nums,
@@ -100,20 +113,22 @@ with tab1:
 
 with tab2:
     st.subheader("Comparación de Resultados")
+    st.write("### Últimos dos sorteos registrados")
     
-    # Mostrar último resultado simulado (reemplazar con el scraping real del último sorteo)
-    ultimo_sorteo = df.iloc[0]
-    ultimos_nums = ultimo_sorteo[['N1', 'N2', 'N3', 'N4', 'N5']].tolist()
-    ultima_sb = ultimo_sorteo['SuperBalota']
-    
-    st.info(f"Último sorteo ganador: **{ultimos_nums}** | SB: **{ultima_sb}**")
+    # Extraer los primeros 2 registros (los más recientes)
+    if len(df) >= 2:
+        ultimos_sorteos = df.head(2)
+        for i, (_, sorteo) in enumerate(ultimos_sorteos.iterrows()):
+            nums = sorteo[['N1', 'N2', 'N3', 'N4', 'N5']].tolist()
+            sb = sorteo['SuperBalota']
+            st.info(f"**Sorteo {i+1}**: {nums} | SB: **{sb}**")
     
     if st.session_state.historial_usuario:
+        st.write("---")
         st.write("### Tu Historial")
         df_historial = pd.DataFrame(st.session_state.historial_usuario)
         st.dataframe(df_historial, use_container_width=True)
         
-        # Botón para descargar el JSON actualizado
         json_descarga = json.dumps(st.session_state.historial_usuario, indent=4)
         st.download_button(
             label="💾 Descargar Historial Actualizado",
@@ -126,15 +141,25 @@ with tab2:
 
 with tab3:
     st.subheader("Sube el soporte de tu jugada")
-    st.write("Sube una foto de tu tiquete para extraer los números mediante OCR.")
-    imagen_soporte = st.file_uploader("Captura de tiquete", type=['jpg', 'jpeg', 'png'])
+    st.write("Sube tu tiquete (Imagen o PDF) para extraer los números mediante OCR.")
+    archivo_soporte = st.file_uploader("Captura de tiquete", type=['jpg', 'jpeg', 'png', 'pdf'])
     
-    if imagen_soporte is not None:
-        img = Image.open(imagen_soporte)
-        st.image(img, caption="Tiquete cargado", width=400)
-        
-        with st.spinner("Procesando imagen..."):
-            numeros_extraidos = extraer_numeros_imagen(img)
-            st.write("Posibles números detectados en el tiquete:")
-            st.write(numeros_extraidos)
-            st.warning("Verifica los números extraídos. El OCR puede tener variaciones dependiendo de la luz de la foto y la fuente del tiquete.")
+    if archivo_soporte is not None:
+        try:
+            # Lógica para procesar PDF o Imágenes
+            if archivo_soporte.name.lower().endswith('.pdf'):
+                # Convertir la primera página del PDF a imagen
+                imagenes = convert_from_bytes(archivo_soporte.read())
+                img = imagenes[0]
+            else:
+                img = Image.open(archivo_soporte)
+                
+            st.image(img, caption="Tiquete cargado (Vista Previa)", width=400)
+            
+            with st.spinner("Procesando documento..."):
+                numeros_extraidos = extraer_numeros_imagen(img)
+                st.write("Posibles números detectados en el tiquete:")
+                st.write(numeros_extraidos)
+                st.warning("Verifica los números extraídos manualmente.")
+        except Exception as e:
+            st.error(f"Ocurrió un error al procesar el archivo: {e}")

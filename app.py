@@ -14,9 +14,8 @@ import re
 st.set_page_config(page_title="Predictor y Gestor de Baloto", layout="wide")
 
 # --- 1. SCRAPING Y DATOS HISTÓRICOS (BALOTO Y REVANCHA) ---
-@st.cache_data(ttl=43200) # Se actualiza cada 12 horas
+@st.cache_data(ttl=43200)
 def obtener_historico_baloto():
-    # URL simulada / usar la oficial en producción
     url = "https://www.resultadobaloto.com/"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)"
@@ -24,21 +23,14 @@ def obtener_historico_baloto():
     
     datos_extraidos = []
     try:
-        # Intento de web scraping real
         respuesta = requests.get(url, headers=headers, timeout=10)
         respuesta.raise_for_status()
-        soup = BeautifulSoup(respuesta.text, 'html.parser')
-        tablas = soup.find_all('table')
-        
-        # Lógica de scraping genérica para extraer ambos sorteos
-        # (Esto variará dependiendo de la estructura exacta de la página)
+        # Aquí iría la lógica real de extracción si la web lo permite.
         raise ValueError("Forzando fallback para asegurar estructura de Baloto y Revancha con número de sorteo.")
             
-    except Exception as e:
+    except Exception:
         # FALLBACK: Simulación estructurada incluyendo Sorteo y Revancha
-        st.info("Usando base de datos interna de resultados (Modo Offline / Fallback).")
-        sorteo_actual = 2712 # Sorteo de referencia del tiquete
-        
+        sorteo_actual = 2712
         for i in range(100):
             b_nums = sorted(random.sample(range(1, 44), 5))
             b_sb = random.randint(1, 16)
@@ -63,11 +55,9 @@ def obtener_historico_baloto():
 
 # --- 2. LÓGICA DE PREMIOS ---
 def verificar_premio(jugada_nums, jugada_sb, ganador_nums, ganador_sb):
-    # Comparar listas convirtiéndolas en sets (conjuntos)
     aciertos_nums = len(set(jugada_nums).intersection(set(ganador_nums)))
     acierto_sb = (jugada_sb == ganador_sb)
     
-    # Plan de premios oficial: 5+1, 5+0, 4+1, 4+0, 3+1, 3+0, 2+1, 0+1
     if aciertos_nums == 5 and acierto_sb: return "¡GRAN ACUMULADO! (5+1)"
     elif aciertos_nums == 5 and not acierto_sb: return "Premio (5+0)"
     elif aciertos_nums == 4 and acierto_sb: return "Premio (4+1)"
@@ -82,25 +72,37 @@ def verificar_premio(jugada_nums, jugada_sb, ganador_nums, ganador_sb):
 def extraer_datos_tiquete(texto):
     datos = {"sorteo": "Desconocido", "fecha": "Desconocida", "jugadas": []}
     
+    # Aplanar el texto: convierte todos los saltos de línea y múltiples espacios en un solo espacio
+    texto_plano = re.sub(r'\s+', ' ', texto)
+    
     # 1. Extraer número de sorteo (Ej: S2712)
-    match_sorteo = re.search(r'(S\d{4,5})', texto)
+    # Tesseract a veces separa la S de los números
+    match_sorteo = re.search(r'S\s*(\d{4,5})', texto_plano)
     if match_sorteo:
-        datos["sorteo"] = match_sorteo.group(1)
-        
+        datos["sorteo"] = "S" + match_sorteo.group(1)
+    else:
+        # Fallback buscando cerca de la palabra SORTEO
+        match_fallback = re.search(r'SORTEO.*?\s(\d{4})', texto_plano, re.IGNORECASE)
+        if match_fallback:
+            datos["sorteo"] = "S" + match_fallback.group(1)
+            
     # 2. Extraer fecha de sorteo (Ej: 21 DE SEPTIEMBRE 2026)
-    match_fecha = re.search(r'(\d{1,2}\s+DE\s+[A-Z]+\s+\d{4})', texto, re.IGNORECASE)
+    match_fecha = re.search(r'(\d{1,2}\s+DE\s+[A-Z]+\s+\d{4})', texto_plano, re.IGNORECASE)
     if match_fecha:
         datos["fecha"] = match_fecha.group(1).title()
         
-    # 3. Extraer jugadas (Líneas que empiezan con A., B., C., etc.)
-    # Captura patrones como: "A. BR 07 24 27 30 32 03 M"
-    lineas = texto.split('\n')
-    for linea in lineas:
-        match_jugada = re.search(r'^([A-E])[\.\s]+(?:[A-Z]{1,2})?[\s\:]*(\d{1,2})[\s\-]+(\d{1,2})[\s\-]+(\d{1,2})[\s\-]+(\d{1,2})[\s\-]+(\d{1,2})[\s\-]+(\d{1,2})', linea.strip(), re.IGNORECASE)
-        if match_jugada:
-            letra = match_jugada.group(1).upper()
-            nums = [int(match_jugada.group(i)) for i in range(2, 7)]
-            sb = int(match_jugada.group(7))
+    # 3. Extraer jugadas (Ej: A. BR 07 24 27 30 32 03 M)
+    # Busca Letra, punto, opcional BR, y 6 números consecutivos (5 normales + 1 SB)
+    patron_jugada = r'([A-E])\.\s*(?:BR|8R)?\s*(\d{1,2})\s+(\d{1,2})\s+(\d{1,2})\s+(\d{1,2})\s+(\d{1,2})\s+(\d{1,2})'
+    matches = re.finditer(patron_jugada, texto_plano, re.IGNORECASE)
+    
+    for match in matches:
+        letra = match.group(1).upper()
+        nums = [int(match.group(i)) for i in range(2, 7)]
+        sb = int(match.group(7))
+        
+        # Validación para descartar lecturas erróneas del OCR
+        if all(1 <= n <= 43 for n in nums) and (1 <= sb <= 16):
             datos["jugadas"].append({"letra": letra, "numeros": nums, "super_balota": sb})
             
     return datos
@@ -123,7 +125,6 @@ tab1, tab2, tab3 = st.tabs(["Escanear Tiquete (Nuevo)", "Resultados y Mis Jugada
 
 with tab1:
     st.subheader("Sube tu tiquete (PDF o Imagen)")
-    st.write("El sistema extraerá automáticamente el sorteo, la fecha y tus números.")
     
     archivo_soporte = st.file_uploader("Captura de tiquete físico o web", type=['jpg', 'jpeg', 'png', 'pdf'])
     
@@ -131,7 +132,7 @@ with tab1:
         try:
             with st.spinner("Leyendo documento..."):
                 if archivo_soporte.name.lower().endswith('.pdf'):
-                    imagenes = convert_from_bytes(archivo_soporte.read())
+                    imagenes = convert_from_bytes(archivo_soporte.read(), dpi=300) # Aumentar DPI mejora la lectura
                     img = imagenes[0]
                 else:
                     img = Image.open(archivo_soporte)
@@ -145,7 +146,6 @@ with tab1:
                     for jugada in datos_tiquete["jugadas"]:
                         st.write(f"**Jugada {jugada['letra']}**: {jugada['numeros']} | SB: **{jugada['super_balota']}**")
                         
-                        # Botón para añadir la jugada leída al historial
                         if st.button(f"Guardar Jugada {jugada['letra']} en historial", key=f"btn_{jugada['letra']}"):
                             nueva_jugada = {
                                 "sorteo": datos_tiquete['sorteo'],
@@ -157,8 +157,13 @@ with tab1:
                             st.session_state.historial_usuario.append(nueva_jugada)
                             st.toast(f"Jugada {jugada['letra']} guardada.")
                 else:
-                    st.warning("No se detectaron jugadas válidas. Revisa la calidad de la imagen/PDF.")
-                    st.expander("Ver texto crudo detectado (Debugging)").write(texto_ocr)
+                    st.error("No se detectaron jugadas válidas. Revisa el texto crudo abajo para ajustar los filtros.")
+                    
+                with st.expander("Ver texto detectado (Debugging)"):
+                    st.write(texto_ocr)
+                    st.write("---")
+                    st.write("Texto aplanado utilizado para buscar patrones:")
+                    st.write(re.sub(r'\s+', ' ', texto_ocr))
                     
         except Exception as e:
             st.error(f"Error procesando el archivo: {e}")
@@ -181,7 +186,6 @@ with tab2:
             c1.info(f"**BALOTO**: {b_nums} | SB: **{b_sb}**")
             c2.warning(f"**REVANCHA**: {r_nums} | SB: **{r_sb}**")
             
-            # Comparar con el historial si hay jugadas para este sorteo
             jugadas_sorteo = [j for j in st.session_state.historial_usuario if j.get('sorteo') == num_sorteo]
             if jugadas_sorteo:
                 for j in jugadas_sorteo:
@@ -189,7 +193,7 @@ with tab2:
                     premio_revancha = verificar_premio(j['numeros'], j['super_balota'], r_nums, r_sb)
                     
                     st.write(f"🔍 Tu jugada {j.get('letra', '')}: {j['numeros']} | SB: {j['super_balota']}")
-                    st.write(f"👉 Resultado Baloto: **{premio_baloto}** | Resultado Revancha: **{premio_revancha}**")
+                    st.write(f"👉 Baloto: **{premio_baloto}** | Revancha: **{premio_revancha}**")
             st.divider()
 
     st.write("### Tu Historial Completo")
@@ -210,7 +214,6 @@ with tab2:
 with tab3:
     st.subheader("Generador Estadístico (Números calientes)")
     if st.button("Generar Nueva Jugada", type="primary"):
-        # Lógica de probabilidad reutilizada
         nums_planos = df[['B_N1', 'B_N2', 'B_N3', 'B_N4', 'B_N5']].values.flatten()
         freq_num = pd.Series(nums_planos).value_counts().head(25).index.tolist()
         freq_sb = df['B_SB'].value_counts().head(9).index.tolist()

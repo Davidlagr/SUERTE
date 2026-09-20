@@ -13,7 +13,7 @@ import io
 
 st.set_page_config(page_title="Predictor y Gestor de Baloto", layout="wide")
 
-# --- 1. DATOS Y SCRAPING (CON BASE DE DATOS INTEGRADA) ---
+# --- 1. DATOS Y SCRAPING (NUEVA WEB: balotoresultados.co) ---
 @st.cache_data(ttl=10800)
 def obtener_historico():
     # Base de datos de respaldo integrada (Garantiza que la app NUNCA falle)
@@ -31,38 +31,56 @@ S2702,21/08/2026,6,19,26,34,43,12,2,11,22,31,40,6"""
 
     df_base = pd.read_csv(io.StringIO(datos_respaldo))
 
-    # Intento de lectura web (si falla, usa la base integrada)
-    url = "https://www.resultadobaloto.com/"
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    # Scraper adaptado para https://www.balotoresultados.co/historico
+    url = "https://www.balotoresultados.co/historico"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "es-ES,es;q=0.8,en-US;q=0.5,en;q=0.3"
+    }
     
     try:
-        res = requests.get(url, headers=headers, timeout=5)
+        res = requests.get(url, headers=headers, timeout=10)
+        res.raise_for_status()
         soup = BeautifulSoup(res.text, 'html.parser')
-        tablas = soup.find_all('table')
         
+        # Extraemos todo el texto y lo limpiamos para buscar patrones universales
+        # (Esto evade el problema de si usan divs, listas o tablas)
+        texto_limpio = re.sub(r'\s+', ' ', soup.get_text())
+        
+        datos_web = []
+        
+        # Buscamos tablas explícitas primero
+        tablas = soup.find_all('table')
         if tablas:
-            datos_web = []
             for fila in tablas[0].find_all('tr')[1:]: 
-                cols = fila.find_all('td')
+                cols = fila.find_all(['td', 'th'])
                 if len(cols) >= 3:
-                    fecha = cols[0].text.strip()
-                    b_nums = [int(x) for x in re.findall(r'\b\d{1,2}\b', cols[1].text)]
-                    r_nums = [int(x) for x in re.findall(r'\b\d{1,2}\b', cols[2].text)]
-                    match_s = re.search(r'(\d{4,5})', fecha)
+                    texto_fecha = cols[0].get_text(separator=' ').strip()
+                    texto_baloto = cols[1].get_text(separator=' ').strip()
+                    texto_revancha = cols[2].get_text(separator=' ').strip() if len(cols) > 2 else ""
                     
-                    if match_s and len(b_nums) >= 6:
+                    b_nums = [int(x) for x in re.findall(r'\b\d{1,2}\b', texto_baloto)]
+                    r_nums = [int(x) for x in re.findall(r'\b\d{1,2}\b', texto_revancha)]
+                    match_s = re.search(r'(\d{4,5})', texto_fecha)
+                    
+                    if len(b_nums) >= 6:
+                        sorteo = f"S{match_s.group(1)}" if match_s else f"S_{random.randint(1000, 9999)}"
+                        fecha = re.search(r'\d{1,2}[-/]\d{1,2}[-/]\d{2,4}', texto_fecha)
+                        fecha_str = fecha.group(0) if fecha else "Desconocida"
+                        
                         r_n = r_nums if len(r_nums) >= 6 else [0]*6
                         datos_web.append([
-                            f"S{match_s.group(1)}", fecha,
+                            sorteo, fecha_str,
                             b_nums[0], b_nums[1], b_nums[2], b_nums[3], b_nums[4], b_nums[5],
                             r_n[0], r_n[1], r_n[2], r_n[3], r_n[4], r_n[5]
                         ])
+        
+        if datos_web:
+            return pd.DataFrame(datos_web, columns=df_base.columns)
             
-            if datos_web:
-                df_web = pd.DataFrame(datos_web, columns=df_base.columns)
-                return df_web
-    except:
-        pass # Ignorar error de red y retornar base local
+    except Exception as e:
+        st.sidebar.warning(f"Modo offline activado. (Motivo: {e})")
         
     return df_base
 
@@ -125,7 +143,7 @@ if archivo_cargado is not None:
 
 st.sidebar.divider()
 st.sidebar.header("⚙️ Ingresar Sorteo Manual")
-st.sidebar.caption("Usa esto para actualizar resultados si la web oficial falla.")
+st.sidebar.caption("Actualiza resultados si la web oficial retrasa la publicación.")
 ms_sorteo = st.sidebar.text_input("N° Sorteo (Ej: S2712)")
 ms_baloto = st.sidebar.text_input("Baloto (5 números separados por espacio)")
 ms_sb = st.sidebar.number_input("Super Balota (Baloto)", min_value=1, max_value=16)
@@ -225,5 +243,5 @@ with tab3:
         j_nums = sorted(random.sample(top_nums, 5))
         j_sb = random.choice(top_sb)
         
-        st.markdown(f"### Tus números: **{j_nums[0]} - {j_nums[1]} - {j_nums[2]} - {j_nums[3]} - {j_nums[4]}**")
-        st.markdown(f"### Super Balota: **{j_sb}**")
+        st.markdown(f"### Tus números recomendados: **{j_nums[0]} - {j_nums[1]} - {j_nums[2]} - {j_nums[3]} - {j_nums[4]}**")
+        st.markdown(f"### Super Balota recomendada: **{j_sb}**")
